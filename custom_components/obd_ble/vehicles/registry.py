@@ -1,0 +1,21 @@
+"""Registry of available vehicle profiles."""
+
+from __future__ import annotations
+
+from .base import VehicleProfile
+from .chevy_bolt import CHEVY_BOLT_2017_2018, CHEVY_BOLT_2019_PLUS
+
+PROFILES: dict[str, VehicleProfile] = {
+    profile.key: profile
+    for profile in (
+        CHEVY_BOLT_2017_2018,
+        CHEVY_BOLT_2019_PLUS,
+    )
+}
+
+
+def get_profile(key: str) -> VehicleProfile:
+    try:
+        return PROFILES[key]
+    except KeyError as err:
+        raise ValueError(f"unknown vehicle profile: {key!r}") from err

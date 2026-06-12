@@ -1,0 +1,41 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Add a vehicle",
+        "description": "Every Bluetooth device Home Assistant can currently see is listed below, sorted with likely OBD adapters first. If the list is empty, Home Assistant has no working Bluetooth adapter or proxy in range. You can also type a MAC address manually.",
+        "data": {
+          "address": "Adapter Bluetooth address",
+          "name": "Vehicle name",
+          "profile": "Vehicle profile"
+        }
+      },
+      "confirm": {
+        "title": "Set up {name}",
+        "description": "Configure the OBD adapter {name} ({address}).",
+        "data": {
+          "name": "Vehicle name",
+          "profile": "Vehicle profile"
+        }
+      }
+    },
+    "error": {
+      "invalid_address": "Not a valid Bluetooth MAC address (expected AA:BB:CC:DD:EE:FF)."
+    },
+    "abort": {
+      "already_configured": "This adapter is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling intervals",
+        "data": {
+          "idle_interval": "Poll interval while idle (seconds)",
+          "charging_interval": "Poll interval while charging (seconds)"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>obd-ble-card preview harness</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; padding: 24px; background: #111113; font-family: system-ui, sans-serif;
+         display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; }
+  .col { width: 384px; }
+  .col.wide { width: 644px; }
+  h3 { color: #9b9ba3; font-size: 12px; text-transform: uppercase; letter-spacing: .09em; margin: 0 0 12px; }
+</style>
+<script src="../custom_components/obd_ble/frontend/obd-ble-card.js"></script>
+</head>
+<body>
+<div class="col"><h3>hero · segments · charging</h3><div id="hero"></div></div>
+<div class="col"><h3>hero · ring · not charging</h3><div id="hero-ring"></div></div>
+<div class="col"><h3>hero · bar · charging</h3><div id="hero-bar"></div></div>
+<div class="col wide"><h3>wide</h3><div id="wide"></div></div>
+<div class="col"><h3>compact</h3><div id="compact"></div></div>
+<script>
+const states = (charging) => ({
+  "sensor.bolt_battery": { state: "62", attributes: { unit_of_measurement: "%" } },
+  "binary_sensor.bolt_charging": { state: charging ? "on" : "off", attributes: {} },
+  "sensor.bolt_ac_charge_power": { state: "7.4", attributes: { unit_of_measurement: "kW" } },
+  "sensor.bolt_odometer": { state: "39135", attributes: { unit_of_measurement: "km" } },
+  "sensor.bolt_battery_capacity": { state: "144.5", attributes: { unit_of_measurement: "Ah" } },
+  "sensor.bolt_ac_charge_voltage": { state: "240", attributes: { unit_of_measurement: "V" } },
+  "sensor.bolt_ac_charge_current": { state: "30.2", attributes: { unit_of_measurement: "A" } },
+});
+
+const baseConfig = {
+  name: "Daily EV",
+  units: "mi",
+  charge_limit: 80,
+  max_range: 303,
+  usable_kwh: 75,
+  capacity_new: 160,
+  charger_label: "Home · Level 2 · 32 A",
+  entities: {
+    soc: "sensor.bolt_battery",
+    charging: "binary_sensor.bolt_charging",
+    charge_power: "sensor.bolt_ac_charge_power",
+    odometer: "sensor.bolt_odometer",
+    capacity: "sensor.bolt_battery_capacity",
+    ac_voltage: "sensor.bolt_ac_charge_voltage",
+    ac_current: "sensor.bolt_ac_charge_current",
+  },
+  maintenance: [
+    { name: "Cabin air filter", icon: "filter", interval_miles: 22500, interval_months: 24, last_miles: 3220, last_date: "2024-07-20" },
+    { name: "Tire rotation", icon: "tire", interval_miles: 7500, interval_months: 12, last_miles: 19400, last_date: "2025-10-12" },
+    { name: "Brake fluid", icon: "brake", interval_miles: 45000, interval_months: 60, last_miles: 0, last_date: "2022-03-01" },
+    { name: "Battery coolant", icon: "drop", interval_miles: 150000, interval_months: 84, last_miles: 0, last_date: "2022-03-01" },
+  ],
+};
+
+function mount(id, extra, charging = true) {
+  const el = document.createElement("obd-ble-card");
+  el.setConfig({ ...baseConfig, ...extra });
+  el.hass = { states: states(charging) };
+  document.getElementById(id).appendChild(el);
+  return el;
+}
+
+mount("hero", { layout: "hero", gauge: "segments" });
+mount("hero-ring", { layout: "hero", gauge: "ring" }, false);
+mount("hero-bar", { layout: "hero", gauge: "bar" });
+mount("wide", { layout: "wide" });
+mount("compact", { layout: "compact" });
+</script>
+</body>
+</html>

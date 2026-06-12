@@ -1,0 +1,19 @@
+{
+  "domain": "obd_ble",
+  "name": "OBD BLE Vehicle Monitor",
+  "bluetooth": [
+    { "local_name": "VEEPEAK*", "connectable": true },
+    { "local_name": "OBDCheck*", "connectable": true },
+    { "local_name": "OBDII*", "connectable": true }
+  ],
+  "codeowners": ["@Jmann235"],
+  "config_flow": true,
+  "dependencies": ["bluetooth_adapters", "frontend", "http"],
+  "documentation": "https://github.com/Jmann235/ha-obd-ble",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Jmann235/ha-obd-ble/issues",
+  "loggers": ["custom_components.obd_ble"],
+  "requirements": ["bleak-retry-connector>=3.4.0"],
+  "version": "0.3.0"
+}
