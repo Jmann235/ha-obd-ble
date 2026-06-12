@@ -1,2 +1,8 @@
 -r requirements_dev.txt
 pytest-homeassistant-custom-component
+# Leaf deps of homeassistant.components.usb, imported (via bluetooth) when the
+# integration package is imported under the test harness, but not shipped with
+# pytest-homeassistant-custom-component itself.
+aiousbwatcher
+pyserial
+pyudev
