@@ -6,3 +6,6 @@ pytest-homeassistant-custom-component
 aiousbwatcher
 pyserial
 pyudev
+# The integration declares a manifest dependency on frontend (it serves the
+# bundled Lovelace card), so config-flow tests need the frontend assets package.
+home-assistant-frontend
