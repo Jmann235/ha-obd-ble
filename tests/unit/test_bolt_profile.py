@@ -13,17 +13,27 @@ def pid_by_key(profile, key: str) -> PidDefinition:
 
 def test_registry_profiles_validate():
     # Profile construction runs strict __post_init__ validation.
-    assert set(PROFILES) == {"chevy_bolt_2017_2018", "chevy_bolt_2019_plus"}
+    assert {"chevy_bolt_2017_2018", "chevy_bolt_2019_plus"} <= set(PROFILES)
     with pytest.raises(ValueError):
         get_profile("delorean")
 
 
 @pytest.mark.parametrize("profile_key", sorted(PROFILES))
 def test_headers_grouping(profile_key):
+    """Every PID belongs to exactly one group, and groups cover the table."""
     profile = get_profile(profile_key)
-    assert set(profile.headers) == {0x7E0, 0x7E1, 0x7E4, 0x7E7}
+    assert set(profile.headers) == {p.tx_header for p in profile.pids}
+    grouped = 0
     for header in profile.headers:
-        assert all(p.tx_header == header for p in profile.pids_for_header(header))
+        group = profile.pids_for_header(header)
+        assert all(p.tx_header == header for p in group)
+        grouped += len(group)
+    assert grouped == len(profile.pids)
+
+
+@pytest.mark.parametrize("profile_key", ["chevy_bolt_2017_2018", "chevy_bolt_2019_plus"])
+def test_bolt_uses_four_ecus(profile_key):
+    assert set(get_profile(profile_key).headers) == {0x7E0, 0x7E1, 0x7E4, 0x7E7}
 
 
 def test_soc_decode():
