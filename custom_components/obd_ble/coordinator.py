@@ -227,12 +227,32 @@ class ObdBleCoordinator(DataUpdateCoordinator[VehicleData]):
         pids: list[PidDefinition],
         values: dict[str, float | None],
     ) -> bool:
-        """Poll one ECU header group; first PID probes for a sleeping module."""
+        """Poll one ECU header group; first PID probes for a sleeping module.
+
+        Several sensors often read different byte offsets out of the *same*
+        response — a Hyundai/Kia ``220101`` frame carries twenty signals in
+        one ~9-frame ISO-TP transfer. Requests are therefore memoised for the
+        duration of this group so the transfer happens once per frame rather
+        than once per sensor.
+        """
+        payloads: dict[tuple[int, int, int], bytes] = {}
+        failures: dict[tuple[int, int, int], ElmError] = {}
         for index, pid in enumerate(pids):
+            request = (pid.tx_header, pid.mode, pid.pid)
             try:
-                payload = await session.query(
-                    pid.mode, pid.pid, pid_bytes=pid.pid_bytes, tx_header=pid.tx_header
-                )
+                if (payload := payloads.get(request)) is None:
+                    # A request that already failed this cycle stays failed;
+                    # re-asking would cost another adapter timeout per sensor.
+                    if (previous := failures.get(request)) is not None:
+                        raise previous
+                    try:
+                        payload = await session.query(
+                            pid.mode, pid.pid, pid_bytes=pid.pid_bytes, tx_header=pid.tx_header
+                        )
+                    except (NoDataError, NegativeResponseError) as err:
+                        failures[request] = err
+                        raise
+                    payloads[request] = payload
                 values[pid.key] = pid.decode(payload)
             except NoDataError:
                 if index == 0:
