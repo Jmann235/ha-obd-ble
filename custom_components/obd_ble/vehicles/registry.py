@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from .base import VehicleProfile
 from .chevy_bolt import CHEVY_BOLT_2017_2018, CHEVY_BOLT_2019_PLUS
+from .kia_ev6 import KIA_EV6
 
 PROFILES: dict[str, VehicleProfile] = {
     profile.key: profile
     for profile in (
         CHEVY_BOLT_2017_2018,
         CHEVY_BOLT_2019_PLUS,
+        KIA_EV6,
     )
 }
 

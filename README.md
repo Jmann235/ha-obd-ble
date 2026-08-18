@@ -107,6 +107,61 @@ check:
 PID research credit: [Sean Graham's community Bolt PID list](https://allev.info/boltpids/)
 (CC BY-NC-SA 2.5 CA), chevybolt.org forums, and the WiCAN project.
 
+## Entities (Kia EV6 / E-GMP profile)
+
+Profile key `kia_ev6`. Should apply unchanged to the Hyundai Ioniq 5/6 and
+Kia EV9 — same platform, same BMS DIDs — but has only been read against an
+EV6 so far. Everything lives on the BMS at header `7E4`, so there is a
+single poll group and two multi-frame reads per cycle.
+
+| Entity | Source | Notes |
+| --- | --- | --- |
+| Battery (%) | `220105` @7E4 byte 31 | dash-displayed SOC, 0.5 % steps |
+| Battery raw (%) | `220101` @7E4 byte 4 | the BMS's own wider-window SOC |
+| Battery health (%) | `220105` @7E4 byte 25 | **unconfirmed** — see below |
+| HV battery voltage / current | `220101` bytes 12 / 10 | current is signed, **negative = charging** |
+| HV battery power (kW) | derived | V x I, same sign convention |
+| Battery temperature max/min (°C) | `220101` bytes 14 / 15 | |
+| Cell voltage max/min (V) | `220101` bytes 23 / 25 | disabled by default |
+| 12V battery voltage | `220101` byte 29 | the BMS's reading, distinct from the adapter's `ATRV` |
+| Cumulative energy charged/discharged (kWh) | `220101` bytes 38 / 42 | monotonic, **not** lifetime — see below |
+| Cumulative charge/discharge (Ah) | `220101` bytes 30 / 34 | disabled by default |
+
+Byte offsets are into the payload *after* the `62 01 xx` echo. Confirmed
+against a 2022 EV6 Long Range by decoding raw frames from the integration's
+own diagnostics transcript, and cross-checked two ways that are hard to pass
+by accident:
+
+- max and min cell voltage both read 3.74 V, and 192 cells x 3.74 V = 718 V
+  against a measured pack voltage of 719.0 V;
+- the cumulative counters imply average pack voltages of 752 V charging and
+  734 V discharging (kWh / Ah) — right magnitude for an 800 V pack, and in
+  the right order.
+
+**Two Kona/Niro offsets do not carry over to E-GMP** and are deliberately
+absent rather than shipped wrong:
+
+- *battery inlet temperature at byte 22* read 75 °C while the module
+  temperatures at bytes 16-20 read a consistent 30-32 °C;
+- *the HV charging flag at bit 7 of byte 9* read `0x00` with 1.3 kW flowing
+  into the pack — and the main-relay bit in that same byte cannot be zero
+  while power flows, so byte 9 is not that byte here. Charging detection uses
+  the **sign of pack current** instead, which needs no bit archaeology.
+
+**Two caveats worth reading before trusting a number:**
+
+- *Battery health* decodes to exactly 100.0 % on a 103,256 km car. An
+  independent capacity check on the same pack implies ~1.3 % of ageing. Either
+  the field is coarse on E-GMP or byte 25 is not SOH. Marked `verified=False`;
+  a reading from a more worn pack would settle it.
+- *The cumulative counters are monotonic but not lifetime-since-new.* On that
+  same car they imply 3.85 kWh/100 km, which is impossible. Something reset
+  them. They are perfectly good `utility_meter` sources — use the deltas, not
+  the absolute values.
+
+PID research credit: the [OVMS Hyundai Ioniq 5 component](https://github.com/openvehicles/Open-Vehicle-Monitoring-System-3)
+(`hif_can_poll.cpp`) and [JejuSoul/OBD-PIDs-for-HKMC-EVs](https://github.com/JejuSoul/OBD-PIDs-for-HKMC-EVs).
+
 ## Dashboard card ("Garage Hero")
 
 The integration ships a custom Lovelace card — no HACS frontend repo or
