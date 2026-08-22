@@ -25,6 +25,7 @@ from elm.obd import assemble_isotp_messages, extract_payload, parse_frame_line
 from vehicles.base import PidDefinition
 from vehicles.kia_ceed_phev import (
     CELL_COUNT,
+    FLAG_MAIN_RELAY,
     FLAG_NORMAL_CHARGE_PORT,
     FLAG_RAPID_CHARGE_PORT,
 )
@@ -232,10 +233,31 @@ def test_derived_power_tolerates_a_missing_input(profile):
     assert power.compute({}) is None
 
 
-def test_every_row_is_marked_unverified(profile):
-    """Nothing here has met a Ceed yet. If a row gets promoted, it should be
-    a deliberate edit with a capture behind it, not a default."""
-    assert [p.key for p in profile.pids if p.verified] == []
+def test_only_measured_rows_are_marked_verified(profile):
+    """Promotion to verified=True must track the capture, not optimism.
+
+    Everything below is confirmed by the 2026-08-22 frame. Rows left False are
+    either plausible-but-uncrosschecked (powers, operating time, motor speed at
+    a standstill) or on DID 0x05, which has never been polled on this car.
+    """
+    assert {p.key for p in profile.pids if p.verified} == {
+        "hv_voltage",
+        "hv_current",
+        "soc_bms",
+        "battery_temp_max",
+        "battery_temp_min",
+        "battery_inlet_temp",
+        "cell_voltage_max",
+        "cell_voltage_min",
+        "aux_voltage",
+        "bms_flags",
+        "cumulative_energy_charged",
+        "cumulative_energy_discharged",
+        "cumulative_charge_ah",
+        "cumulative_discharge_ah",
+    }
+    # DID 0x05 stays entirely unverified until that frame is actually read.
+    assert not any(p.verified for p in profile.pids if p.pid == 0x05)
 
 
 def test_dash_soc_is_not_the_default_battery_sensor(profile):
@@ -246,58 +268,96 @@ def test_dash_soc_is_not_the_default_battery_sensor(profile):
     assert pid_by_key(profile, "soh").enabled_default is False
 
 
-# --- Awaiting a real capture from the car ------------------------------------
-# Paste the 2101 frame lines from `bench.py sweep --state charging` (or the
-# integration's Download diagnostics) into CAPTURE_2101 and drop the skip
-# marks. These are the checks that make the byte map proven rather than
-# merely well-corroborated — the same two the EV6 profile rests on, scaled to
-# a 64-cell pack.
-CAPTURE_2101: list[str] = []
+# --- Real capture, 2019 Ceed PHEV, 2026-08-22 13:09 local -------------------
+# Lifted verbatim from the integration's diagnostics transcript with the car in
+# READY, unplugged, sitting still. This is the regression anchor: the synthetic
+# frames above prove the arithmetic, only these prove the byte map.
+CAPTURE_2101 = [
+    "7EC103D6101FFFFFFFF",
+    "7EC21BB120116F80300",
+    "7EC221A0F5C14131212",
+    "7EC231213140014CD45",
+    "7EC24CC0100FF8E0007",
+    "7EC25E3A60007E50500",
+    "7EC2602D3290002BA6E",
+    "7EC2701CF3C106D018A",
+    "7EC280000000003E800",
+]
 
 
-@pytest.mark.skipif(not CAPTURE_2101, reason="awaiting bench capture from the Ceed")
+def capture_payload() -> bytes:
+    frames = [f for line in CAPTURE_2101 if (f := parse_frame_line(line))]
+    return extract_payload(assemble_isotp_messages(frames, rx_id=BMS_RX), MODE, 0x01, 1)
+
+
+def test_real_capture_service_21_echo_is_stripped():
+    """The frame announces 61 bytes: 2 of echo (61 01) plus 59 of payload."""
+    assert len(capture_payload()) == 59
+
+
+def test_real_capture_decoders(profile):
+    payload = capture_payload()
+    d = {p.key: p.decode(payload) for p in profile.pids if p.pid == 0x01}
+
+    assert d["hv_voltage"] == pytest.approx(393.2)
+    assert d["hv_current"] == pytest.approx(2.6)  # discharging into its own loads
+    assert d["soc_bms"] == pytest.approx(93.5)
+    assert d["battery_temp_max"] == pytest.approx(20.0)
+    assert d["battery_temp_min"] == pytest.approx(19.0)
+    assert d["aux_voltage"] == pytest.approx(14.2)
+    assert d["cell_voltage_max"] == pytest.approx(4.10)
+    assert d["cell_voltage_min"] == pytest.approx(4.08)
+    assert d["cumulative_energy_charged"] == pytest.approx(18512.9)
+    assert d["cumulative_energy_discharged"] == pytest.approx(17879.8)
+
+
 def test_real_capture_cell_voltages_reconstruct_the_pack(profile):
-    """64 cells x measured cell voltage must land on the pack voltage.
+    """96 cells x measured cell voltage must land on the pack voltage.
 
     Cell voltage and pack voltage live in different parts of the frame, so
-    agreeing to within a percent by accident is not credible.
+    agreeing to within a percent by accident is not credible. This is also the
+    check that refutes the Niro table's series count of 64, which would be 33 %
+    low.
     """
-    frames = [f for line in CAPTURE_2101 if (f := parse_frame_line(line))]
-    payload = extract_payload(assemble_isotp_messages(frames, rx_id=BMS_RX), MODE, 0x01, 1)
+    payload = capture_payload()
     cell = pid_by_key(profile, "cell_voltage_max").decode(payload)
     pack = pid_by_key(profile, "hv_voltage").decode(payload)
     assert 3.0 < cell < 4.3
     assert CELL_COUNT * cell == pytest.approx(pack, rel=0.01)
+    assert 64 * cell != pytest.approx(pack, rel=0.05)
 
 
-@pytest.mark.skipif(not CAPTURE_2101, reason="awaiting bench capture from the Ceed")
-def test_real_capture_counters_imply_a_plausible_240v_pack(profile):
+def test_real_capture_counters_imply_a_plausible_360v_pack(profile):
     """kWh / Ah must land on a sane average pack voltage, charge above discharge."""
-    frames = [f for line in CAPTURE_2101 if (f := parse_frame_line(line))]
-    payload = extract_payload(assemble_isotp_messages(frames, rx_id=BMS_RX), MODE, 0x01, 1)
+    payload = capture_payload()
     d = {p.key: p.decode(payload) for p in profile.pids if p.pid == 0x01}
     v_charge = d["cumulative_energy_charged"] / d["cumulative_charge_ah"] * 1000
     v_discharge = d["cumulative_energy_discharged"] / d["cumulative_discharge_ah"] * 1000
-    assert 200 < v_discharge < v_charge < 290
+    assert 320 < v_discharge < v_charge < 400
 
 
-@pytest.mark.skipif(not CAPTURE_2101, reason="awaiting bench capture from the Ceed")
 def test_real_capture_inlet_temp_is_near_the_cell_temps(profile):
-    """Byte 22 is the offset E-GMP had to drop. On this platform it should
-    read within a few degrees of the pack, not tens."""
-    frames = [f for line in CAPTURE_2101 if (f := parse_frame_line(line))]
-    payload = extract_payload(assemble_isotp_messages(frames, rx_id=BMS_RX), MODE, 0x01, 1)
+    """Byte 22 is the offset E-GMP had to drop. Here it sits inside the pack's
+    own temperature range, so it carries what the PHEV tables say it does."""
+    payload = capture_payload()
     inlet = pid_by_key(profile, "battery_inlet_temp").decode(payload)
     t_min = pid_by_key(profile, "battery_temp_min").decode(payload)
     t_max = pid_by_key(profile, "battery_temp_max").decode(payload)
-    assert t_min - 10 <= inlet <= t_max + 10
+    assert t_min - 2 <= inlet <= t_max + 2
 
 
-@pytest.mark.skipif(not CAPTURE_2101, reason="awaiting bench capture from the Ceed")
-def test_real_capture_has_no_dc_port(profile):
-    """The Ceed PHEV is AC-only. Bit 6 set would mean byte 9 is not the flag
-    byte on this platform, the same way it was not on E-GMP."""
-    frames = [f for line in CAPTURE_2101 if (f := parse_frame_line(line))]
-    payload = extract_payload(assemble_isotp_messages(frames, rx_id=BMS_RX), MODE, 0x01, 1)
-    flags = int(pid_by_key(profile, "bms_flags").decode(payload))
-    assert not flags & FLAG_RAPID_CHARGE_PORT
+def test_real_capture_flag_byte_is_alive(profile):
+    """Byte 9 reads 0x03 in READY: main relay closed while power flows, and
+    neither charge-port bit set. On an EV6 the same byte reads 0x00."""
+    flags = int(pid_by_key(profile, "bms_flags").decode(capture_payload()))
+    assert flags == 0x03
+    assert flags & FLAG_MAIN_RELAY
+    assert not flags & FLAG_NORMAL_CHARGE_PORT  # was not plugged in
+    assert not flags & FLAG_RAPID_CHARGE_PORT  # AC-only car
+
+
+def test_real_capture_is_not_reported_as_charging(profile):
+    """The end-to-end case: awake, unplugged, current flowing. Must be False."""
+    payload = capture_payload()
+    values = {p.key: p.decode(payload) for p in profile.pids if p.pid == 0x01}
+    assert profile.charging_detector(values) is False
