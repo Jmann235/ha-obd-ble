@@ -12,10 +12,15 @@ echo is two. That difference is invisible in the decoders and fatal if
 extract_payload gets it wrong, which is why test_echo_length_is_two_bytes
 exists.
 
-The physical cross-checks that would turn these offsets from
-well-corroborated into proven are written at the bottom and skipped, waiting
-on a bench capture from the car. Filling in CAPTURE_2101 is the only edit
-needed to run them.
+The physical cross-checks at the bottom run against a real capture taken from
+the car on 2026-08-22 and are what turn the DID 0x01 offsets from
+well-corroborated into proven.
+
+The mode 01 rows at the end are a different kind of test. Their decodes are
+J1979, not guesswork, so what is worth asserting is that they are addressed to
+the engine ECU rather than the BMS, that the two-byte ``41 xx`` echo is
+stripped correctly, and that the boundary values the standard specifies come
+out right.
 """
 
 from __future__ import annotations
@@ -24,7 +29,10 @@ import pytest
 from elm.obd import assemble_isotp_messages, extract_payload, parse_frame_line
 from vehicles.base import PidDefinition
 from vehicles.kia_ceed_phev import (
+    BMS,
     CELL_COUNT,
+    ENGINE,
+    FLAG_HV_CHARGING,
     FLAG_MAIN_RELAY,
     FLAG_NORMAL_CHARGE_PORT,
     FLAG_RAPID_CHARGE_PORT,
@@ -71,6 +79,21 @@ def roundtrip(did: int, payload: bytes) -> bytes:
     return extract_payload(messages, MODE, did, 1)
 
 
+ENGINE_RX = 0x7E8
+
+
+def roundtrip_mode01(pid: int, payload: bytes) -> bytes:
+    """Same path for a mode 01 response off the engine ECU.
+
+    The echo is ``41 <pid>`` — also two bytes, but from a different service and
+    a different header, so it is worth proving separately.
+    """
+    message = bytes([0x41, pid]) + payload
+    frames = [f for line in isotp_lines(ENGINE_RX, message) if (f := parse_frame_line(line))]
+    messages = assemble_isotp_messages(frames, rx_id=ENGINE_RX)
+    return extract_payload(messages, 0x01, pid, 1)
+
+
 def build_2101(*, flags: int = 0x00) -> bytes:
     """A plausible DID 0x01 payload for a 64-cell, ~240 V PHEV pack.
 
@@ -115,15 +138,38 @@ def profile_fixture():
 
 def test_profile_is_registered(profile):
     assert profile.manufacturer == "Kia"
-    # One ECU, so one poll group and one probe.
-    assert profile.headers == (0x7E4,)
+    # Two ECUs, so two poll groups. Order matters: the coordinator ORs the
+    # groups' wake results, but the BMS group must come first so the
+    # best-corroborated response is what the transcript opens with.
+    assert profile.headers == (BMS, ENGINE)
 
 
 def test_profile_uses_service_21_with_one_byte_ids(profile):
-    """The whole platform difference from E-GMP, asserted once."""
-    assert {p.mode for p in profile.pids} == {0x21}
-    assert {p.pid_bytes for p in profile.pids} == {1}
-    assert {p.pid for p in profile.pids} == {0x01, 0x05}
+    """The whole platform difference from E-GMP, asserted once.
+
+    Only the HKMC rows: the mode 01 rows added for the ICE side are ordinary
+    J1979 and are checked separately.
+    """
+    hkmc = [p for p in profile.pids if p.mode == 0x21]
+    assert {p.pid_bytes for p in hkmc} == {1}
+    assert {p.pid for p in hkmc} == {0x01, 0x05}
+    assert {p.tx_header for p in hkmc} == {BMS}
+    # Every row is either an HKMC service 21 row or a J1979 mode 01 row.
+    assert {p.mode for p in profile.pids} == {0x21, 0x01}
+
+
+def test_ice_rows_are_addressed_to_the_engine_ecu(profile):
+    """A mode 01 request sent to 7E4 would be answered by the BMS, or not at
+    all. The header, not the mode, is what routes these."""
+    ice = [p for p in profile.pids if p.mode == 0x01]
+    assert {p.tx_header for p in ice} == {ENGINE}
+    assert {p.pid_bytes for p in ice} == {1}
+    assert {p.pid for p in ice} == {0x2F, 0x5E, 0x05, 0x1F, 0x31}
+    # 0x05 is a coolant temperature here and a BMS DID there. Same number,
+    # different ECU, different service — this is exactly why the header is not
+    # a detail.
+    assert pid_by_key(profile, "coolant_temp").tx_header == ENGINE
+    assert pid_by_key(profile, "soc_display").tx_header == BMS
 
 
 def test_echo_length_is_two_bytes():
@@ -197,15 +243,29 @@ def test_regen_is_not_reported_as_charging(profile):
     assert profile.charging_detector(values) is False
 
 
+def test_ac_port_bit_alone_does_not_mean_charging(profile):
+    """Regression on a measured wrong answer.
+
+    Bit 5 is the Ioniq table's "normal charge port", and this detector used to
+    key on it. On the real car it stayed clear through a confirmed 2.9 kW AC
+    charge, so it cannot be the deciding bit — and anything that reads it as
+    one reports "not charging" while the car charges.
+    """
+    payload = roundtrip(0x01, build_2101(flags=FLAG_MAIN_RELAY | FLAG_NORMAL_CHARGE_PORT))
+    values = {p.key: p.decode(payload) for p in profile.pids if p.pid == 0x01 and p.mode == 0x21}
+    assert values["hv_current"] < 0
+    assert profile.charging_detector(values) is False
+
+
 def test_plugged_in_and_flowing_is_charging(profile):
-    payload = roundtrip(0x01, build_2101(flags=FLAG_NORMAL_CHARGE_PORT))
+    payload = roundtrip(0x01, build_2101(flags=FLAG_HV_CHARGING))
     values = {p.key: p.decode(payload) for p in profile.pids if p.pid == 0x01}
     assert profile.charging_detector(values) is True
 
 
 def test_plugged_in_but_finished_is_not_charging(profile):
     """Port occupied, nothing flowing — a completed charge, not an active one."""
-    p = bytearray(build_2101(flags=FLAG_NORMAL_CHARGE_PORT))
+    p = bytearray(build_2101(flags=FLAG_HV_CHARGING))
     p[10:12] = (0).to_bytes(2, "big", signed=True)
     values = {
         pid.key: pid.decode(roundtrip(0x01, bytes(p))) for pid in profile.pids if pid.pid == 0x01
@@ -219,8 +279,8 @@ def test_charging_detector_declines_to_guess_without_flags(profile):
 
 
 def test_hv_power_sign_is_negative_while_charging(profile):
-    payload = roundtrip(0x01, build_2101(flags=FLAG_NORMAL_CHARGE_PORT))
-    values = {p.key: p.decode(payload) for p in profile.pids if p.pid == 0x01}
+    payload = roundtrip(0x01, build_2101(flags=FLAG_HV_CHARGING))
+    values = {p.key: p.decode(payload) for p in profile.pids if p.pid == 0x01 and p.mode == 0x21}
     (power,) = profile.derived
     # 241.6 V x -13.8 A = -3.33 kW, i.e. ~3.3 kW into the pack — which is
     # exactly the Ceed PHEV's onboard AC charger rating.
@@ -255,9 +315,16 @@ def test_only_measured_rows_are_marked_verified(profile):
         "cumulative_energy_discharged",
         "cumulative_charge_ah",
         "cumulative_discharge_ah",
+        # ICE side: the two with a cross-check behind them. distance_since_clear
+        # matched an independent ABRP log exactly; coolant_temp landed within
+        # 2 °C of the pack sensors on a car whose engine had not run. Fuel
+        # level, fuel rate and run time all read but none is corroborated.
+        "coolant_temp",
+        "distance_since_clear",
     }
     # DID 0x05 stays entirely unverified until that frame is actually read.
-    assert not any(p.verified for p in profile.pids if p.pid == 0x05)
+    assert not any(p.verified for p in profile.pids if p.mode == 0x21 and p.pid == 0x05)
+    assert not pid_by_key(profile, "fuel_level").verified
 
 
 def test_dash_soc_is_not_the_default_battery_sensor(profile):
@@ -352,6 +419,7 @@ def test_real_capture_flag_byte_is_alive(profile):
     flags = int(pid_by_key(profile, "bms_flags").decode(capture_payload()))
     assert flags == 0x03
     assert flags & FLAG_MAIN_RELAY
+    assert not flags & FLAG_HV_CHARGING  # discharging, and not plugged in
     assert not flags & FLAG_NORMAL_CHARGE_PORT  # was not plugged in
     assert not flags & FLAG_RAPID_CHARGE_PORT  # AC-only car
 
@@ -361,3 +429,74 @@ def test_real_capture_is_not_reported_as_charging(profile):
     payload = capture_payload()
     values = {p.key: p.decode(payload) for p in profile.pids if p.pid == 0x01}
     assert profile.charging_detector(values) is False
+
+
+# --- Mode 01, engine ECU ----------------------------------------------------
+def test_mode01_echo_is_stripped(profile):
+    """41 2F, not 41 2F xx. Same trap as service 21, different service."""
+    payload = bytes(range(1, 8))
+    assert roundtrip_mode01(0x2F, payload) == payload
+
+
+def test_ice_decoders_match_the_standard(profile):
+    """J1979 boundary values, one per row.
+
+    These are not offsets to be discovered — the standard fixes them — so what
+    is tested is that the right scale is applied to the right byte after the
+    echo comes off.
+    """
+    fuel = pid_by_key(profile, "fuel_level")
+    assert fuel.decode(roundtrip_mode01(0x2F, bytes([0]))) == pytest.approx(0.0)
+    assert fuel.decode(roundtrip_mode01(0x2F, bytes([255]))) == pytest.approx(100.0)
+    # The reading actually taken from the car: 178 -> 69.8 %.
+    assert fuel.decode(roundtrip_mode01(0x2F, bytes([178]))) == pytest.approx(69.8, abs=0.05)
+
+    rate = pid_by_key(profile, "engine_fuel_rate")
+    assert rate.decode(roundtrip_mode01(0x5E, bytes([0x00, 0x00]))) == pytest.approx(0.0)
+    # 0x0064 = 100 -> 5.00 L/h, a plausible warm-up burn.
+    assert rate.decode(roundtrip_mode01(0x5E, bytes([0x00, 0x64]))) == pytest.approx(5.0)
+
+    coolant = pid_by_key(profile, "coolant_temp")
+    # A - 40, so the offset must survive: 0 is -40 °C, not 0 °C.
+    assert coolant.decode(roundtrip_mode01(0x05, bytes([0]))) == pytest.approx(-40.0)
+    assert coolant.decode(roundtrip_mode01(0x05, bytes([66]))) == pytest.approx(26.0)
+    assert coolant.decode(roundtrip_mode01(0x05, bytes([130]))) == pytest.approx(90.0)
+
+    runtime = pid_by_key(profile, "engine_run_time")
+    assert runtime.decode(roundtrip_mode01(0x1F, bytes([0x01, 0x2C]))) == pytest.approx(300.0)
+
+    distance = pid_by_key(profile, "distance_since_clear")
+    # The two readings the ABRP cross-check was built from.
+    assert distance.decode(roundtrip_mode01(0x31, (26301).to_bytes(2, "big"))) == 26301
+    assert distance.decode(roundtrip_mode01(0x31, (26309).to_bytes(2, "big"))) == 26309
+
+
+def test_engine_run_time_is_not_a_total(profile):
+    """It resets to zero on every engine start. Declaring it total_increasing
+    would make Home Assistant treat each start as a meter rollover."""
+    assert pid_by_key(profile, "engine_run_time").state_class == "measurement"
+    assert pid_by_key(profile, "distance_since_clear").state_class == "total_increasing"
+
+
+def test_fuel_rows_are_enabled_by_default(profile):
+    """Fuel consumption is the reason the ICE rows exist, so the two that feed
+    it ship on. Run time is a diagnostic and ships off."""
+    assert pid_by_key(profile, "fuel_level").enabled_default is True
+    assert pid_by_key(profile, "engine_fuel_rate").enabled_default is True
+    assert pid_by_key(profile, "coolant_temp").enabled_default is True
+    assert pid_by_key(profile, "engine_run_time").enabled_default is False
+
+
+def test_ice_rows_do_not_disturb_the_wake_probe(profile):
+    """The coordinator probes each group with that group's first PID, so the
+    BMS group must still open on the best-corroborated row.
+
+    The ICE rows form their own group behind it, which also means a sleeping
+    engine ECU cannot make the car look asleep while the BMS is answering.
+    """
+    assert profile.pids[0].key == "hv_voltage"
+    assert profile.pids[0].mode == 0x21
+    assert profile.pids_for_header(BMS)[0].key == "hv_voltage"
+    assert profile.pids_for_header(ENGINE)[0].key == "fuel_level"
+    assert all(p.mode == 0x21 for p in profile.pids_for_header(BMS))
+    assert all(p.mode == 0x01 for p in profile.pids_for_header(ENGINE))
