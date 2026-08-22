@@ -15,9 +15,27 @@ transport change was needed. If the Ceed's BMS answers ``2101`` with NRC 0x11
 (service not supported), the fallback is mode 0x22 / pid 0x0101 /
 ``pid_bytes=2`` and nothing else in this file changes.
 
-NOTHING HERE IS CONFIRMED ON A CEED. Every row is ``verified=False``. What
-is known is how well-corroborated each row is, and that splits sharply by
-frame:
+CONFIRMED against a real 2019 Ceed PHEV on 2026-08-22, by decoding the raw
+``2101`` frame out of the integration's diagnostics transcript with the car in
+READY and unplugged. Two independent cross-checks say the DID 0x01 byte map is
+right rather than merely plausible:
+
+* max cell voltage read 4.10 V and 96 cells x 4.10 V = 393.6 V against a
+  measured pack voltage of 393.2 V — 0.1 % apart, from two offsets that sit in
+  different parts of the frame.
+* the cumulative counters imply average pack voltages of 358 V charging and
+  346 V discharging (kWh / Ah) — correct magnitudes for a 360 V nominal pack,
+  and in the right order, since charging sits above discharging.
+
+A third, weaker check: byte 29 read 14.2 V against the adapter's own ``ATRV``
+reading of 14.5 V on the same rail, measured through a completely separate
+path.
+
+DID 0x05 is still unconfirmed — its rows are disabled by default, so the
+frame is never polled and nothing here has seen it.
+
+What remains unverified is flagged per row. The corroboration behind each
+offset before the bench pass split sharply by frame:
 
 * **DID 0x01 — strong.** The Niro PHEV and Ioniq PHEV tables agree on all 30
   rows they share, and the 12 of those that also exist in the E-GMP profile
@@ -40,10 +58,14 @@ Byte offsets are into the payload *after* the ``61 01`` service echo, which
 is what ``ObdSession.query`` returns.
 
 Two offsets that E-GMP had to drop are kept here, because this platform is
-where they came from: battery inlet temperature at byte 22, and the flag byte
-at byte 9. On an EV6 byte 9 read 0x00 with 1.3 kW flowing; on a PHEV it is
-documented as carrying the charge-port and main-relay bits. Byte 9 is exposed
-raw as ``bms_flags`` precisely so one glance at the diagnostics settles it.
+where they came from — and both are now confirmed alive on the Ceed:
+
+* battery inlet temperature at byte 22 read 20 °C against cell temperatures of
+  19-20 °C. On an EV6 the same byte read 75 °C against 30-32 °C.
+* byte 9 read 0x03 with the HV system live: the main-relay bit is set, which is
+  exactly what it must be while 1.0 kW flows. On an EV6 that byte reads 0x00
+  even while charging. It is exposed raw as ``bms_flags`` so this stays
+  checkable, and the DC-port bit reads 0 as it must on an AC-only car.
 """
 
 from __future__ import annotations
@@ -64,10 +86,16 @@ FLAG_NORMAL_CHARGE_PORT = 0x20  # bit 5 — AC. The Ceed PHEV has no DC port.
 FLAG_RAPID_CHARGE_PORT = 0x40  # bit 6 — must stay 0 on this car; free sanity check
 FLAG_HV_CHARGING = 0x80  # bit 7
 
-# 8.9 kWh pack, 64 cells in series (the Niro table computes average cell
-# voltage as pack/64, and its 204-275.2 V range is 64 x 3.19-4.30 V). This is
-# the number the bench cross-check multiplies by.
-CELL_COUNT = 64
+# 8.9 kWh pack, 96 cells in series -> 360 V nominal. MEASURED: 96 x 4.10 V =
+# 393.6 V against a pack reading of 393.2 V (0.1 %), and the cumulative
+# counters imply a 346-358 V average.
+#
+# The Niro PHEV table says 64, computing average cell voltage as pack/64 with a
+# 204-275.2 V range. That is a 240 V, 64-cell pack — i.e. the Niro *HEV*
+# figures, which that table was derived from and never corrected; its own
+# README lists "adjusting values to match PHEV specs" as an open TODO. 64 cells
+# would put this car 33 % off. Do not take the series count from that table.
+CELL_COUNT = 96
 
 
 def _detect_charging(values: Mapping[str, float | None]) -> bool | None:
@@ -82,10 +110,16 @@ def _detect_charging(values: Mapping[str, float | None]) -> bool | None:
     which is semantically exactly the question being asked. Current sign is
     kept only as a corroborating check that something is actually flowing in.
 
-    If byte 9 turns out dead on the Ceed the way it is on E-GMP, this returns
-    False forever rather than True wrongly — a missing sensor, not a lying
-    one. ``bms_flags`` is exposed so that shows up as an obvious 0 instead of
-    a mystery. Bench check: read bms_flags unplugged, then plugged.
+    Byte 9 is ALIVE on this platform, unlike E-GMP. Measured 0x03 with the car
+    in READY and unplugged: the main-relay bit set (correct, 1.0 kW was
+    flowing), the AC-port bit clear (correct, nothing plugged in), and the
+    DC-port bit clear as it must be on an AC-only car. An EV6 reads 0x00 on the
+    same byte even while charging.
+
+    Still unmeasured: the AC-port bit going high. That needs one reading with
+    the charger connected. Until then a plugged-in Ceed would report "not
+    charging" — a missing sensor rather than a lying one, and ``bms_flags`` is
+    exposed so the raw byte stays inspectable.
     """
     flags = values.get("bms_flags")
     if flags is None:
@@ -122,7 +156,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         decode=lambda p: u16(p, 12) / 10,
         unit="V",
         device_class="voltage",
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="hv_current",
@@ -134,10 +168,16 @@ _PIDS: tuple[PidDefinition, ...] = (
         # Sign is OBD-native: positive = discharge, negative = into the pack.
         # On a PHEV "into the pack" is not necessarily the wallbox — see
         # _detect_charging.
+        #
+        # The offset and scaling are confirmed: +2.6 A at 393.2 V gave 1.02 kW
+        # for a car sitting in READY, which is the right order for its own
+        # electronics. Only the discharge direction has been observed so far;
+        # the negative-while-charging case is inferred from the shared HKMC
+        # convention, not yet measured on this car.
         decode=lambda p: s16(p, 10) / 10,
         unit="A",
         device_class="current",
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="soc_bms",
@@ -152,7 +192,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         decode=lambda p: u8(p, 4) * 0.5,
         unit="%",
         device_class="battery",
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="battery_temp_max",
@@ -165,7 +205,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         unit="°C",
         device_class="temperature",
         precision=0,
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="battery_temp_min",
@@ -178,7 +218,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         unit="°C",
         device_class="temperature",
         precision=0,
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="battery_inlet_temp",
@@ -195,7 +235,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         unit="°C",
         device_class="temperature",
         precision=0,
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="cell_voltage_max",
@@ -209,7 +249,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         device_class="voltage",
         precision=2,
         enabled_default=False,
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="cell_voltage_min",
@@ -223,7 +263,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         device_class="voltage",
         precision=2,
         enabled_default=False,
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="aux_voltage",
@@ -235,7 +275,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         decode=lambda p: u8(p, 29) * 0.1,
         unit="V",
         device_class="voltage",
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="bms_flags",
@@ -254,7 +294,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         precision=0,
         icon="mdi:flag-outline",
         enabled_default=False,
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="max_charge_power",
@@ -296,7 +336,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         unit="kWh",
         device_class="energy",
         state_class="total_increasing",
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="cumulative_energy_discharged",
@@ -309,7 +349,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         unit="kWh",
         device_class="energy",
         state_class="total_increasing",
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="cumulative_charge_ah",
@@ -322,7 +362,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         unit="Ah",
         state_class="total_increasing",
         enabled_default=False,
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="cumulative_discharge_ah",
@@ -335,7 +375,7 @@ _PIDS: tuple[PidDefinition, ...] = (
         unit="Ah",
         state_class="total_increasing",
         enabled_default=False,
-        verified=False,
+        verified=True,
     ),
     PidDefinition(
         key="operating_time",
@@ -395,10 +435,14 @@ _PIDS: tuple[PidDefinition, ...] = (
         tx_header=BMS,
         # u16@35 per the Ioniq PHEV table, which names it "State of Health".
         # The Niro table instead has "Maximum Deterioration" at u16@25 — a
-        # different quantity, and notably the offset E-GMP used for SOH and
-        # got a suspicious exactly-100.0 %. Worth settling here: if @35 gives
-        # a believable non-round number on the Ceed, that is also evidence
-        # the EV6 profile's soh row is reading the wrong field.
+        # different quantity, and the offset E-GMP uses for SOH.
+        #
+        # Do NOT read across platforms here. Decoding a real EV6 0105 frame at
+        # @35 gives 0x0000: that payload is 43 bytes and bytes 35-38 fall in a
+        # trailing run of nulls, so @35 is simply not a field on E-GMP and says
+        # nothing about the EV6's own suspicious exactly-100.0 % at @25.
+        # Whether @35 is real *here* is still open — this frame has not been
+        # polled on the Ceed, because this row ships disabled.
         decode=lambda p: u16(p, 35) / 10,
         unit="%",
         icon="mdi:battery-heart-variant",
