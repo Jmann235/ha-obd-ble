@@ -4,7 +4,7 @@ PID research credit: JejuSoul/OBD-PIDs-for-HKMC-EVs, specifically the
 ``Kia Niro PHEV - 8.9kWh`` and ``Ioniq PHEV - 8.9kWh`` tables. A small subset
 of those facts is re-expressed here.
 
-Header map (request -> response): 7E4->7EC BMS. Single poll group.
+Header map (request -> response): 7E4->7EC BMS, 7E0->7E8 engine ECU.
 
 ⚠️ SERVICE 21, NOT 22. Where E-GMP answers ``220101``, the 8.9 kWh PHEV
 platform is documented on ``2101`` — service 0x21 (the legacy HKMC
@@ -62,10 +62,54 @@ where they came from — and both are now confirmed alive on the Ceed:
 
 * battery inlet temperature at byte 22 read 20 °C against cell temperatures of
   19-20 °C. On an EV6 the same byte read 75 °C against 30-32 °C.
-* byte 9 read 0x03 with the HV system live: the main-relay bit is set, which is
-  exactly what it must be while 1.0 kW flows. On an EV6 that byte reads 0x00
-  even while charging. It is exposed raw as ``bms_flags`` so this stays
-  checkable, and the DC-port bit reads 0 as it must on an AC-only car.
+* byte 9 read 0x03 with the HV system live and nothing plugged in, and 0x83
+  while the car drew 2.9 kW from the wallbox. On an EV6 that byte reads 0x00
+  even while charging. Bits 0 and 1 are set in both states; bit 7 is the only
+  one that moved, so bit 7 is what the charging detector keys on. Bit 5 —
+  which the Ioniq table labels the normal (AC) charge port — stayed CLEAR
+  through that entire confirmed AC charge, so it is *not* the AC-port bit on
+  this car. See ``_detect_charging`` for what that settles and what it does
+  not. The byte ships raw as ``bms_flags`` so it stays inspectable, and the
+  DC-port bit reads 0 as it must on an AC-only car.
+
+THE ICE SIDE
+------------
+A plug-in hybrid burns petrol, so a profile that stops at the BMS describes
+half the car. Unlike everything above, these rows are not HKMC-specific: they
+are plain SAE J1979 mode 01 PIDs on the engine ECU at 7E0, and each decode is
+fixed by the standard rather than reverse-engineered from a Torque table.
+
+What *is* car-specific is which of them this ECU answers, and that was
+enumerated rather than assumed. The three supported-PID bitmasks read
+
+    0100 -> BE3FA813    0120 -> 801FB015    0140 -> FEDC8C85
+
+i.e. 48 supported PIDs, among them 0x2F (fuel tank level) and 0x5E (engine
+fuel rate) — the two that matter for running-cost tracking. The Ceed also
+answers 0902 (VIN), which an EV6 does not, so the engine ECU really is there
+and really is talking.
+
+Measured on 2026-08-22, engine cold and not running:
+
+* ``0131`` distance since codes cleared read 26301 km and then 26309 km after
+  two short trips. An independent ABRP log of those same two trips recorded
+  4 km + 4 km. Exact agreement between two unrelated systems, so this row is
+  marked verified.
+* ``0105`` coolant temperature read 21-26 °C over the afternoon against
+  battery module temperatures of 22-24 °C, on a car whose engine had not
+  started. Right magnitude, and it tracks ambient, which confirms the A-40
+  decode. No hot-engine sample yet, but a wrong offset or scale could not
+  land inside 2 °C of the pack sensors by luck.
+* ``015E`` fuel rate and ``011F`` engine run time both read exactly 0 with the
+  engine off. Correct, but it only proves the PIDs answer — neither scale
+  factor has been exercised against a running engine, so both stay unverified.
+* ``012F`` fuel level is the awkward one. It read 178/255 = 69.8 % while the
+  dashboard showed a nearly full tank and the car's own cloud range estimate
+  implied roughly 39 L in a 37 L tank. The raw byte also threw one 197 reading
+  between two 178s, which no stationary tank does. So the byte is being read,
+  but neither its span nor its stability is established: shipped unverified,
+  and anything downstream should calibrate against litres actually pumped
+  rather than treating this as a tank percentage.
 """
 
 from __future__ import annotations
@@ -75,16 +119,21 @@ from collections.abc import Mapping
 from .base import DerivedDefinition, PidDefinition, VehicleProfile, s8, s16, u8, u16, u32
 
 BMS = 0x7E4
+ENGINE = 0x7E0  # standard J1979 engine ECU, for the mode 01 rows
 
 # Service 21 local identifiers on the BMS.
 DID_BMS_MAIN = 0x01  # pack electricals, temps, flags, cumulative counters
 DID_BMS_AUX = 0x05  # deterioration / SOH / dash SOC — layout unsettled
 
-# Bits within byte 9 of DID 0x01, per the Ioniq PHEV table.
-FLAG_MAIN_RELAY = 0x01  # bit 0
-FLAG_NORMAL_CHARGE_PORT = 0x20  # bit 5 — AC. The Ceed PHEV has no DC port.
-FLAG_RAPID_CHARGE_PORT = 0x40  # bit 6 — must stay 0 on this car; free sanity check
-FLAG_HV_CHARGING = 0x80  # bit 7
+# Bits within byte 9 of DID 0x01. Names from the Ioniq PHEV table; the
+# comments are what this car actually did. Two states have been measured:
+# 0x03 in READY, unplugged, 1.0 kW leaving the pack; 0x83 while taking 2.9 kW
+# from the wallbox.
+FLAG_MAIN_RELAY = 0x01  # bit 0 — set in both states, as it must be
+FLAG_UNKNOWN_BIT1 = 0x02  # bit 1 — set in both states; meaning unestablished
+FLAG_NORMAL_CHARGE_PORT = 0x20  # bit 5 — clear even mid-AC-charge; see _detect_charging
+FLAG_RAPID_CHARGE_PORT = 0x40  # bit 6 — never set; the Ceed PHEV has no DC port
+FLAG_HV_CHARGING = 0x80  # bit 7 — the bit that actually followed charging
 
 # 8.9 kWh pack, 96 cells in series -> 360 V nominal. MEASURED: 96 x 4.10 V =
 # 393.6 V against a pack reading of 393.2 V (0.1 %), and the cumulative
@@ -106,27 +155,35 @@ def _detect_charging(values: Mapping[str, float | None]) -> bool | None:
     Ceed in hybrid mode charges its own HV battery down the motorway. Ship the
     EV6 detector here and the car reports "charging" for half of every trip.
 
-    So the plug decides, not the current: byte 9 bit 5 is the AC charge port,
-    which is semantically exactly the question being asked. Current sign is
-    kept only as a corroborating check that something is actually flowing in.
+    So a flag bit decides and the current sign only corroborates. Byte 9 is
+    ALIVE on this platform, unlike E-GMP, and two measured states pin down
+    which bit to use:
 
-    Byte 9 is ALIVE on this platform, unlike E-GMP. Measured 0x03 with the car
-    in READY and unplugged: the main-relay bit set (correct, 1.0 kW was
-    flowing), the AC-port bit clear (correct, nothing plugged in), and the
-    DC-port bit clear as it must be on an AC-only car. An EV6 reads 0x00 on the
-    same byte even while charging.
+    * 0x03 — READY, unplugged, 1.0 kW leaving the pack.
+    * 0x83 — plugged in, 2.9 kW entering the pack from the wallbox.
 
-    Still unmeasured: the AC-port bit going high. That needs one reading with
-    the charger connected. Until then a plugged-in Ceed would report "not
-    charging" — a missing sensor rather than a lying one, and ``bms_flags`` is
-    exposed so the raw byte stays inspectable.
+    Bit 7 is the only bit that moved, so bit 7 is the charging signal. Bit 5,
+    which the Ioniq PHEV table labels the normal (AC) charge port, was clear
+    through the whole of that confirmed AC charge. Keying on it — the obvious
+    reading of the table, and what this function did first — reports "not
+    charging" while the car charges, so do not restore it.
+
+    What bit 7 *means* is still open. "Charge port energised" and "HV battery
+    is being charged from any source" both fit the two samples, and they differ
+    during a drive: the second would also go high under regen and under HSG
+    charging, which is exactly the false positive this detector exists to
+    avoid. The current-sign term does not separate them either, since regen is
+    also current into the pack. Two things bound the damage — the adapter is
+    only in BLE range while the car is parked, so driving states are rarely
+    sampled at all, and ``bms_flags`` ships raw so the byte stays inspectable.
+    The clean fix, once the drive-motor-speed offset is confirmed, is to
+    require a stationary motor here as well.
     """
     flags = values.get("bms_flags")
     if flags is None:
         # No flag byte, no way to separate wall charging from engine/regen.
         return None
-    plugged = int(flags) & FLAG_NORMAL_CHARGE_PORT
-    if not plugged:
+    if not int(flags) & FLAG_HV_CHARGING:
         return False
     current = values.get("hv_current")
     if current is None:
@@ -464,6 +521,92 @@ _PIDS: tuple[PidDefinition, ...] = (
         enabled_default=False,
         verified=False,
     ),
+    # --- Mode 01 on the engine ECU: the ICE side ---
+    # Plain SAE J1979, so the decodes come from the standard rather than from a
+    # Torque table. All five confirmed answering on this car; the module
+    # docstring records which reading backs which row, and why only two of them
+    # are marked verified.
+    PidDefinition(
+        key="fuel_level",
+        name="Fuel level",
+        mode=0x01,
+        pid=0x2F,
+        pid_bytes=1,
+        tx_header=ENGINE,
+        # J1979 defines this as A * 100 / 255. Whether the sender actually
+        # spans the byte is a separate question, and on this car it appears not
+        # to: 178 read against a nearly full 37 L tank. Treat the movement as
+        # meaningful and the absolute percentage as uncalibrated.
+        decode=lambda p: u8(p, 0) * 100 / 255,
+        unit="%",
+        icon="mdi:gas-station",
+        precision=1,
+        verified=False,
+    ),
+    PidDefinition(
+        key="engine_fuel_rate",
+        name="Engine fuel rate",
+        mode=0x01,
+        pid=0x5E,
+        pid_bytes=1,
+        tx_header=ENGINE,
+        # J1979: (256A + B) / 20 L/h. Read 0.00 with the engine off, which says
+        # the PID answers but exercises neither the scale nor the offset.
+        decode=lambda p: u16(p, 0) / 20,
+        unit="L/h",
+        icon="mdi:fuel",
+        precision=2,
+        verified=False,
+    ),
+    PidDefinition(
+        key="coolant_temp",
+        name="Engine coolant temperature",
+        mode=0x01,
+        pid=0x05,
+        pid_bytes=1,
+        tx_header=ENGINE,
+        # J1979: A - 40 °C. On a PHEV this is the cold-start detector that
+        # matters — cabin heat comes from the engine, so below roughly 15 °C
+        # ambient the ICE fires in the driveway before the car has moved.
+        decode=lambda p: float(u8(p, 0) - 40),
+        unit="°C",
+        device_class="temperature",
+        precision=0,
+    ),
+    PidDefinition(
+        key="engine_run_time",
+        name="Engine run time",
+        mode=0x01,
+        pid=0x1F,
+        pid_bytes=1,
+        tx_header=ENGINE,
+        # J1979: (256A + B) seconds since this engine start. Resets to 0 every
+        # start, so it is a measurement, not a total.
+        decode=lambda p: float(u16(p, 0)),
+        unit="s",
+        device_class="duration",
+        precision=0,
+        icon="mdi:engine-outline",
+        enabled_default=False,
+        verified=False,
+    ),
+    PidDefinition(
+        key="distance_since_clear",
+        name="Distance since codes cleared",
+        mode=0x01,
+        pid=0x31,
+        pid_bytes=1,
+        tx_header=ENGINE,
+        # J1979: (256A + B) km. Not the odometer — a DTC clear resets it — but
+        # it is the only distance this dongle can see, and trip deltas taken
+        # from it matched an independent ABRP log exactly (see the docstring).
+        decode=lambda p: float(u16(p, 0)),
+        unit="km",
+        device_class="distance",
+        state_class="total_increasing",
+        precision=0,
+        icon="mdi:map-marker-distance",
+    ),
 )
 
 _DERIVED: tuple[DerivedDefinition, ...] = (
@@ -479,7 +622,7 @@ _DERIVED: tuple[DerivedDefinition, ...] = (
     ),
 )
 
-# bms_flags is the plug signal, hv_current only corroborates it.
+# bms_flags carries the charging bit, hv_current only corroborates it.
 _CHARGING_INPUTS = ("bms_flags", "hv_current")
 
 
