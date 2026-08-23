@@ -172,23 +172,28 @@ def _detect_charging(values: Mapping[str, float | None]) -> bool | None:
     is being charged from any source" both fit the two samples, and they differ
     during a drive: the second would also go high under regen and under HSG
     charging, which is exactly the false positive this detector exists to
-    avoid. The current-sign term does not separate them either, since regen is
-    also current into the pack. Two things bound the damage — the adapter is
-    only in BLE range while the car is parked, so driving states are rarely
-    sampled at all, and ``bms_flags`` ships raw so the byte stays inspectable.
-    The clean fix, once the drive-motor-speed offset is confirmed, is to
-    require a stationary motor here as well.
+    avoid. Two things bound the damage — the adapter is only in BLE range
+    while the car is parked, so driving states are rarely sampled at all, and
+    ``bms_flags`` ships raw so the byte stays inspectable. The clean fix, once
+    the drive-motor-speed offset is confirmed, is to require a stationary
+    motor here as well.
+
+    REGRESSION, 2026-08-23: this used to also require ``hv_current < -0.2``
+    after the flag check, on the theory that current only "corroborates".
+    That is wrong and was caught by a live miss, not a review: the first poll
+    after plugging in read flags=0x80 (bit 7 set, genuinely charging) and
+    hv_current=0.0 (the AC charger had not ramped up yet), and the AND turned
+    a real charging start into a reported "not charging". Bit 7 is the only
+    measured signal for this state; requiring a second, unrelated measurement
+    to also clear before believing it just adds a race the flag alone doesn't
+    have. So the flag is the entire answer once present — current is kept
+    only as an exposed, inspectable value, never as a gate.
     """
     flags = values.get("bms_flags")
     if flags is None:
         # No flag byte, no way to separate wall charging from engine/regen.
         return None
-    if not int(flags) & FLAG_HV_CHARGING:
-        return False
-    current = values.get("hv_current")
-    if current is None:
-        return True
-    return current < -0.2
+    return bool(int(flags) & FLAG_HV_CHARGING)
 
 
 def _hv_power(values: Mapping[str, float | None]) -> float | None:
