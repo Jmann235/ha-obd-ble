@@ -263,14 +263,26 @@ def test_plugged_in_and_flowing_is_charging(profile):
     assert profile.charging_detector(values) is True
 
 
-def test_plugged_in_but_finished_is_not_charging(profile):
-    """Port occupied, nothing flowing — a completed charge, not an active one."""
+def test_flag_alone_decides_even_at_zero_current(profile):
+    """Regression, 2026-08-23: this used to also require hv_current < -0.2 after
+    the flag check, on the theory that current only corroborates.
+
+    That is what happened live the first time the car was plugged in and
+    caught by the coordinator: the poll right after plugging in read
+    flags=0x80 (bit 7 set, genuinely charging) and hv_current=0.0, because
+    the AC charger had not ramped up current yet. The old AND turned a real
+    charging start into a reported "not charging", and because the
+    coordinator only speeds up its poll interval once charging reads True,
+    it also stayed on the slow 5-minute cadence instead of the 1-minute one
+    right when a fast recheck was needed. Bit 7 must decide alone.
+    """
     p = bytearray(build_2101(flags=FLAG_HV_CHARGING))
-    p[10:12] = (0).to_bytes(2, "big", signed=True)
+    p[10:12] = (0).to_bytes(2, "big", signed=True)  # 0.0 A: charger not ramped up yet
     values = {
         pid.key: pid.decode(roundtrip(0x01, bytes(p))) for pid in profile.pids if pid.pid == 0x01
     }
-    assert profile.charging_detector(values) is False
+    assert values["hv_current"] == 0.0
+    assert profile.charging_detector(values) is True
 
 
 def test_charging_detector_declines_to_guess_without_flags(profile):
