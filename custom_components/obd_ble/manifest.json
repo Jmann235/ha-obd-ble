@@ -15,5 +15,5 @@
   "issue_tracker": "https://github.com/Jmann235/ha-obd-ble/issues",
   "loggers": ["custom_components.obd_ble"],
   "requirements": ["bleak-retry-connector>=3.4.0"],
-  "version": "0.3.0"
+  "version": "0.4.0"
 }
