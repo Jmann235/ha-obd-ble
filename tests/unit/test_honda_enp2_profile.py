@@ -36,7 +36,10 @@ def test_registered_profile():
     assert profile.vin_tx_header == 0x18DA07F1
     assert profile.vin_did == 0xF190
     assert profile.headers == (0x18DA01F1, 0x18DA60F1)
-    assert {p.key for p in profile.pids} == {"soc", "odometer"}
+    assert {p.key for p in profile.pids if p.enabled_default} == {"soc", "odometer"}
+    candidates = [p for p in profile.pids if not p.verified]
+    assert len(candidates) == 7
+    assert all(not p.enabled_default and "experimental" in p.name for p in candidates)
     assert profile.charging_detector({"soc": 81}) is None
 
 
@@ -82,3 +85,50 @@ def test_other_ecu_cannot_supply_soc(capture):
 def test_invalid_profile_protocol():
     with pytest.raises(ValueError, match="unsupported CAN protocol"):
         replace(get_profile("honda_enp2"), elm_protocol=0)
+
+
+@pytest.mark.parametrize(
+    "key,expected",
+    [
+        ("hv_voltage", 383.6),
+        ("hv_current", 1.4),
+        ("battery_temp_max", 10),
+        ("battery_temp_min", 8),
+        ("cell_soc_max", 79.76),
+        ("cell_soc_min", 78.33),
+        ("battery_capacity", 191.0),
+    ],
+)
+def test_candidate_extraction_from_live_capture(capture, key, expected):
+    # Locks byte offsets against the actual response, not physical accuracy.
+    _, value = decode_capture(get_profile("honda_enp2"), key, capture["research_202a"]["response"])
+    assert value == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    "key,length",
+    [
+        ("hv_voltage", 56),
+        ("hv_current", 58),
+        ("battery_temp_max", 59),
+        ("battery_temp_min", 60),
+        ("cell_soc_max", 74),
+        ("cell_soc_min", 76),
+        ("battery_capacity", 168),
+    ],
+)
+def test_candidate_truncated_payload_rejected(key, length):
+    pid = next(p for p in get_profile("honda_enp2").pids if p.key == key)
+    with pytest.raises((ValueError, IndexError)):
+        pid.decode(bytes(length))
+
+
+def test_experimental_power_requires_both_inputs():
+    power = next(d for d in get_profile("honda_enp2").derived if d.key == "hv_power")
+    assert not power.enabled_default
+    assert power.inputs == ("hv_voltage", "hv_current")
+    assert power.compute({"hv_voltage": 383.6}) is None
+    assert power.compute({"hv_voltage": None, "hv_current": 1.4}) is None
+    assert power.compute({"hv_voltage": 383.6, "hv_current": 1.4}) == pytest.approx(0.53704)
+    # Signed current is preserved without asserting which sign means charging.
+    assert power.compute({"hv_voltage": 383.6, "hv_current": -1.4}) == pytest.approx(-0.53704)

@@ -121,6 +121,7 @@ and Kia profiles retain their 11-bit protocol defaults.
 | Battery (%) | `18DA01F1` | `22202A` | data byte 50 |
 | Odometer (km) | `18DA60F1` | `227022` | data bytes 5-8, unsigned big-endian |
 | 12V battery voltage | adapter | `ATRV` | adapter-measured supply voltage |
+| VIN (diagnostic text sensor) | `18DA07F1` | `22F190` | cached VIN read by coordinator |
 
 SOC **81%** and odometer **9063 km** were independently checked against an
 e:NP2 dashboard on 2026-11-01 using an iCar Pro 2S through an ESPHome proxy.
@@ -128,9 +129,33 @@ The captured responses are regression fixtures: `202A` contains 243 data
 bytes and `7022` contains 54. Offsets count from zero after complete ISO-TP
 reassembly and removal of the `62` and DID echo; padding is excluded.
 VIN is read separately with `22F190` at `18DA07F1`.
+The VIN sensor is available for every vehicle profile, uses the coordinator's
+persisted VIN and adds no polling. It stays unknown until a VIN is read.
 
-SOH, traction voltage/current, battery temperatures and charging detection
-are not included because their formulas have not been verified for e:NP2.
+Seven additional PID sensors and derived power are **experimental**, named
+accordingly and **disabled by default**. Enable them individually in HA's
+entity settings to help validate the candidate maps. All use `22202A` at
+`18DA01F1`; a shared DID is queried only once per polling cycle.
+
+| Experimental entity | Candidate formula | Latest capture |
+| --- | --- | --- |
+| HV battery voltage | unsigned BE bytes 55-56 / 20 | 383.6 V |
+| HV battery current | signed BE bytes 57-58 / 50 | +1.4 A |
+| HV battery power | voltage × current / 1000 | +0.53704 kW |
+| Battery temperature max/min | unsigned bytes 59 / 60 | 10 / 8 °C |
+| Cell SOC max/min | unsigned BE bytes 73-74 / 75-76, each / 100 | 79.76 / 78.33% |
+| Battery capacity | unsigned BE bytes 167-168 / 100 | 191.0 Ah |
+
+These values demonstrate extraction, not independent physical validation.
+Voltage is a plausibility hypothesis (offset **55**, not 54). Current sign
+has not been checked while charging. Temperature extrema agree with the
+hypothesis that `202D` bytes 27-74 encode 48 temperatures as `raw / 2 - 40`;
+neither mapping is independently confirmed. That array is not polled here.
+Capacity matches the 191.0 Ah example in Honda's e:Ny1 HDS documentation;
+it must not be labeled SOH. Cell SOC extrema are not a second pack SOC.
+
+SOH, cell voltages, cumulative energy/Ah counters and charging detection
+remain unavailable because no reliable e:NP2 map has been established.
 The profile does not determine charging state, so it uses the idle polling
 interval. A missing standard mode 01 response does not imply that the Honda
 modules are asleep: this profile polls the verified manufacturer DIDs.
@@ -138,7 +163,11 @@ modules are asleep: this profile polls the verified manufacturer DIDs.
 The initial DID/offset research came from
 [Honda e community diagnostic mapping](https://www.honda-e-forum.de/forum/thread/161-can-bus-protokoll-bit-header-und-baudrate/?postID=4387)
 and [Honda's e:Ny1 BMS documentation](https://www.techinfo.honda-eu.com/sites/default/files/2025-04/eNy1_BMS_TR_001.pdf);
-only the two fields confirmed on the e:NP2 are exposed here.
+the two dashboard-confirmed fields remain enabled by default. Candidate
+current and cell-SOC maps also use the
+[Honda e parameter catalog](https://pelican.clutch.engineering/cars/honda/e/parameters),
+which contains unverified entries for other platforms and is not evidence
+of e:NP2 compatibility on its own.
 
 ## Entities (Kia EV6 / E-GMP profile)
 
