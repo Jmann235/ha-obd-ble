@@ -63,6 +63,13 @@ async def test_initialize_fails_on_unconfigured_adapter(elm_factory):
         await elm.initialize()
 
 
+async def test_initialize_29_bit_protocol(elm_factory):
+    elm, transport = elm_factory(dict(INIT_RESPONSES))
+    await elm.initialize(protocol=7)
+    assert "ATSP7" in transport.writes
+    assert "ATSP6" not in transport.writes
+
+
 async def test_echo_lines_are_stripped(elm_factory):
     elm, _ = elm_factory({"228334": "228334\r7EC04628334D5\r\r>"})
     lines = await elm.command("228334")
@@ -99,6 +106,25 @@ async def test_transcript_records_io(elm_factory):
 
 
 class TestObdSession:
+    async def test_honda_header_filter_and_flow_control(self, elm_factory):
+        elm, transport = elm_factory({"22202A": "18DAF1010462202A51\r\r>"})
+        session = ObdSession(elm)
+        assert await session.query(0x22, 0x202A, tx_header=0x18DA01F1) == b"\x51"
+        assert transport.writes == [
+            "ATSH18DA01F1", "ATCRA18DAF101", "ATFCSH18DA01F1",
+            "ATFCSD300000", "ATFCSM1", "22202A",
+        ]
+        await session.query(0x22, 0x202A, tx_header=0x18DA01F1)
+        assert transport.writes.count("ATFCSM1") == 1
+
+    async def test_honda_vin_length_prefix_and_padding(self, elm_factory):
+        vin = b"LHG00000000000000"
+        payload = bytes.fromhex("62F19011") + vin + bytes(3)
+        lines = ["18DAF107" + (bytes([0x10, len(payload)]) + payload[:6]).hex()]
+        for seq, offset in enumerate(range(6, len(payload), 7), start=1):
+            lines.append("18DAF107" + (bytes([0x20 | seq]) + payload[offset:offset+7]).hex())
+        elm, _ = elm_factory({"22F190": "\r".join(lines) + "\r\r>"})
+        assert await ObdSession(elm).read_vin(tx_header=0x18DA07F1, did=0xF190) == vin.decode()
     async def test_query_sets_header_and_filter_once(self, elm_factory):
         elm, transport = elm_factory(
             {

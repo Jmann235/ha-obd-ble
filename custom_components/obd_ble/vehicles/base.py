@@ -68,8 +68,14 @@ class PidDefinition:
             raise ValueError(f"{self.key}: pid_bytes must be 1 or 2")
         if not 0 <= self.pid < (1 << (8 * self.pid_bytes)):
             raise ValueError(f"{self.key}: pid {self.pid:#x} exceeds {self.pid_bytes} bytes")
-        if not 0x700 <= self.tx_header <= 0x7FF:
-            raise ValueError(f"{self.key}: tx_header {self.tx_header:#x} not an 11-bit OBD id")
+        if not (
+            0x700 <= self.tx_header <= 0x7FF
+            or (
+                0 <= self.tx_header <= 0x1FFFFFFF
+                and self.tx_header & 0x1FFF00FF == 0x18DA00F1
+            )
+        ):
+            raise ValueError(f"{self.key}: invalid OBD request id {self.tx_header:#x}")
 
 
 @dataclass(frozen=True)
@@ -104,8 +110,15 @@ class VehicleProfile:
     )
     # PID keys the charging detector reads; always polled.
     charging_inputs: tuple[str, ...] = ()
+    # ISO 15765-4: 6/8 = 11-bit, 7/9 = 29-bit (500/250 kbit/s).
+    elm_protocol: int = 6
+    vin_tx_header: int = 0x7E0
+    # None uses standard mode 09 PID 02; otherwise read this UDS DID.
+    vin_did: int | None = None
 
     def __post_init__(self) -> None:
+        if self.elm_protocol not in (6, 7, 8, 9):
+            raise ValueError(f"{self.key}: unsupported CAN protocol {self.elm_protocol}")
         keys = [p.key for p in self.pids] + [d.key for d in self.derived]
         duplicates = {k for k in keys if keys.count(k) > 1}
         if duplicates:

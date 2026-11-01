@@ -185,7 +185,7 @@ class ObdBleCoordinator(DataUpdateCoordinator[VehicleData]):
         try:
             async with asyncio.timeout(CYCLE_TIMEOUT_SECONDS):
                 await transport.connect()
-                await elm.initialize()
+                await elm.initialize(protocol=self.profile.elm_protocol)
                 adapter_voltage = await elm.voltage()
 
                 for header in self.profile.headers:
@@ -269,7 +269,9 @@ class ObdBleCoordinator(DataUpdateCoordinator[VehicleData]):
         return True
 
     async def _read_and_store_vin(self, session: ObdSession) -> None:
-        vin = await session.read_vin()
+        vin = await session.read_vin(
+            tx_header=self.profile.vin_tx_header, did=self.profile.vin_did
+        )
         if vin is None:
             return
         self._vin = vin

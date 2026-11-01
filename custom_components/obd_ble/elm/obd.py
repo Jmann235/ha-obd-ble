@@ -1,8 +1,10 @@
 """OBD-II / GM-extended queries over an Elm327, with ISO-TP reassembly.
 
-Frame lines arrive as ``<3 hex CAN id><hex data>`` (ATH1 + ATS0). A request
+Frame lines arrive as ``<3 or 8 hex CAN id><hex data>`` (ATH1 + ATS0). A request
 to a module at ``tx_header`` (e.g. 0x7E4, the Bolt BECM) is answered from
-``tx_header + 8`` (0x7EC). Multi-frame responses are ISO 15765-2 segmented;
+``tx_header + 8`` (0x7EC). For 29-bit normal-fixed requests, source and
+destination addresses swap (18DA01F1 -> 18DAF101).
+Multi-frame responses are ISO 15765-2 segmented;
 the ELM auto-sends flow control, we reassemble the printed frames.
 """
 
@@ -51,10 +53,27 @@ def parse_frame_line(line: str) -> tuple[int, bytes] | None:
     can skip them.
     """
     compact = line.replace(" ", "")
-    # 3 hex chars of 11-bit id + at least one data byte, even hex length after id.
-    if len(compact) < 5 or not _HEX_LINE_RE.match(compact) or (len(compact) - 3) % 2 != 0:
+    if not _HEX_LINE_RE.fullmatch(compact):
         return None
-    return int(compact[:3], 16), bytes.fromhex(compact[3:])
+    # 11-bit identifiers have 3 hex characters, 29-bit identifiers have 8.
+    # Their different parity makes ATH1/ATS0 lines unambiguous.
+    header_length = 3 if len(compact) % 2 else 8
+    if len(compact) < header_length + 2:
+        return None
+    can_id = int(compact[:header_length], 16)
+    if can_id > (0x7FF if header_length == 3 else 0x1FFFFFFF):
+        return None
+    return can_id, bytes.fromhex(compact[header_length:])
+
+
+def response_id(tx_header: int) -> int:
+    """Response address for 11-bit OBD or 29-bit normal-fixed requests."""
+    if 0x700 <= tx_header <= 0x7FF:
+        return tx_header + 8
+    if 0 <= tx_header <= 0x1FFFFFFF and tx_header & 0x1FFF00FF == 0x18DA00F1:
+        target = (tx_header >> 8) & 0xFF
+        return 0x18DAF100 | target
+    raise ValueError(f"unsupported physical OBD request id: {tx_header:#x}")
 
 
 def assemble_isotp_messages(frames: list[tuple[int, bytes]], rx_id: int | None) -> list[bytes]:
@@ -83,6 +102,9 @@ def assemble_isotp_messages(frames: list[tuple[int, bytes]], rx_id: int | None) 
                 messages.append(bytes(data[1 : 1 + length]))
             assembly = None
         elif frame_type == 1:  # first frame of a segmented message
+            if len(data) < 2:
+                assembly = None
+                continue
             expected_len = ((data[0] & 0x0F) << 8) | data[1]
             assembly = bytearray(data[2:])
             next_seq = 1
@@ -147,16 +169,25 @@ class ObdSession:
     async def _apply_header(self, tx_header: int) -> None:
         if tx_header == self._current_header:
             return
-        await self._elm.command(f"ATSH{tx_header:03X}", check_errors=False)
+        rx_header = response_id(tx_header)
+        await self._elm.command(f"ATSH{tx_header:03X}")
         if self._cra_supported:
             try:
                 # Filter received frames to this module's response id; some
                 # clones lack ATCRA, in which case reassembly's rx_id filter
                 # still protects us.
-                await self._elm.command(f"ATCRA{tx_header + 8:03X}")
+                await self._elm.command(f"ATCRA{rx_header:03X}")
             except ElmCommandError:
                 _LOGGER.debug("Adapter does not support ATCRA; relying on rx_id filter")
                 self._cra_supported = False
+        if tx_header > 0x7FF:
+            # Explicit flow control was verified for the iCar Pro 2S and
+            # Honda's long replies (246 UDS bytes, sequence wraps included).
+            await self._elm.command(f"ATFCSH{tx_header:08X}")
+            await self._elm.command("ATFCSD300000")
+            await self._elm.command("ATFCSM1")
+        elif self._current_header is not None and self._current_header > 0x7FF:
+            await self._elm.command("ATFCSM0")
         self._current_header = tx_header
 
     def reset_header_cache(self) -> None:
@@ -182,7 +213,7 @@ class ObdSession:
         if not frames:
             raise ObdDecodeError(f"no CAN frames in response to {request!r}: {lines!r}")
 
-        messages = assemble_isotp_messages(frames, rx_id=tx_header + 8)
+        messages = assemble_isotp_messages(frames, rx_id=response_id(tx_header))
         try:
             return extract_payload(messages, mode, pid, pid_bytes)
         except NegativeResponseError as err:
@@ -198,15 +229,21 @@ class ObdSession:
                 )
             raise
 
-    async def read_vin(self) -> str | None:
-        """Mode 09 PID 02 from the ECM; returns None if unreadable."""
+    async def read_vin(self, *, tx_header: int = 0x7E0, did: int | None = None) -> str | None:
+        """Read standard mode 09 VIN or a profile's UDS DID; None if unreadable."""
         try:
-            payload = await self.query(0x09, 0x02, pid_bytes=1, tx_header=0x7E0)
+            if did is None:
+                payload = await self.query(0x09, 0x02, pid_bytes=1, tx_header=tx_header)
+            else:
+                payload = await self.query(0x22, did, tx_header=tx_header)
         except (ElmError, TimeoutError) as err:
             _LOGGER.debug("VIN read failed: %s", err)
             return None
         # SAE J1979: a count byte (usually 0x01) precedes the 17 ASCII chars.
-        if payload and payload[0] in (0x01, 0x00):
+        if did is not None and payload and payload[0] == 17:
+            # Honda prefixes the VIN with its byte length and pads the rest.
+            payload = payload[1:18]
+        elif did is None and payload and payload[0] in (0x01, 0x00):
             payload = payload[1:]
         vin = payload.decode("ascii", errors="ignore").strip("\x00 ").strip()
         return vin if len(vin) == 17 else None

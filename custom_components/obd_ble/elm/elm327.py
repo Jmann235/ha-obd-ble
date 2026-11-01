@@ -1,9 +1,9 @@
 """ELM327 AT-command layer on top of the BLE serial transport.
 
 Init strategy: echo/linefeeds/spaces off for compact parsing, headers ON so
-every CAN frame line arrives as ``<11-bit id><data hex>`` (PCI bytes
-included), protocol fixed to ISO 15765-4 CAN 11bit/500k (every OBD-II car
-since 2008, including the Bolt). The ELM still auto-handles ISO-TP flow
+every CAN frame line arrives as ``<CAN id><data hex>`` (PCI bytes
+included), protocol chosen by the vehicle profile (11bit/500k by default).
+The ELM handles ISO-TP flow
 control, so multi-frame responses simply appear as multiple lines.
 """
 
@@ -108,19 +108,26 @@ class Elm327:
         if joined.strip() == "?":
             raise ElmCommandError(f"adapter did not understand {cmd!r}")
 
-    async def initialize(self) -> str:
+    async def initialize(self, protocol: int = 6) -> str:
         """Reset and configure the adapter; returns the identification banner."""
+        if protocol not in (6, 7, 8, 9):
+            raise ValueError(f"unsupported CAN protocol: {protocol}")
         # ATZ resets every setting (and re-enables echo), so it runs first
         # with a generous timeout while the chip reboots.
         banner_lines = await self.command("ATZ", timeout=RESET_TIMEOUT, check_errors=False)
         banner = next((line for line in banner_lines if "ELM" in line or "STN" in line), "")
 
         for cmd in INIT_COMMANDS:
+            if cmd == "ATSP6":
+                cmd = f"ATSP{protocol:X}"
             lines = await self.command(cmd, check_errors=False)
             if not any("OK" in line.upper() for line in lines):
                 # Settings commands answer OK; anything else is a config failure
                 # worth surfacing now rather than as garbled frames later.
                 raise ElmProtocolError(f"init {cmd!r} -> {' | '.join(lines)!r}")
+
+        if protocol in (7, 9):
+            await self.command("ATCFC1")
 
         _LOGGER.debug("ELM initialized: %s", banner or "(no banner)")
         return banner

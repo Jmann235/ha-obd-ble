@@ -45,6 +45,8 @@ sensor / binary_sensor → one HA device per car (VIN as serial)
 - A supported vehicle profile:
   - Chevrolet Bolt EV (2017–2018)
   - Chevrolet Bolt EV/EUV (2019+)
+  - Kia EV6 (E-GMP)
+  - Honda e:NP2
 
 ## Install
 
@@ -106,6 +108,37 @@ check:
 
 PID research credit: [Sean Graham's community Bolt PID list](https://allev.info/boltpids/)
 (CC BY-NC-SA 2.5 CA), chevybolt.org forums, and the WiCAN project.
+
+## Entities (Honda e:NP2 profile)
+
+Select **Honda e:NP2** (profile key `honda_enp2`) when adding the adapter.
+The profile uses ISO 15765-4 **29-bit CAN at 500 kbit/s** (ELM protocol 7),
+with per-ECU receive filters and explicit ISO-TP flow control. Existing Bolt
+and Kia profiles retain their 11-bit protocol defaults.
+
+| Entity | Request header | Query | Decode |
+| --- | --- | --- | --- |
+| Battery (%) | `18DA01F1` | `22202A` | data byte 50 |
+| Odometer (km) | `18DA60F1` | `227022` | data bytes 5-8, unsigned big-endian |
+| 12V battery voltage | adapter | `ATRV` | adapter-measured supply voltage |
+
+SOC **81%** and odometer **9063 km** were independently checked against an
+e:NP2 dashboard on 2026-11-01 using an iCar Pro 2S through an ESPHome proxy.
+The captured responses are regression fixtures: `202A` contains 243 data
+bytes and `7022` contains 54. Offsets count from zero after complete ISO-TP
+reassembly and removal of the `62` and DID echo; padding is excluded.
+VIN is read separately with `22F190` at `18DA07F1`.
+
+SOH, traction voltage/current, battery temperatures and charging detection
+are not included because their formulas have not been verified for e:NP2.
+The profile does not determine charging state, so it uses the idle polling
+interval. A missing standard mode 01 response does not imply that the Honda
+modules are asleep: this profile polls the verified manufacturer DIDs.
+
+The initial DID/offset research came from
+[Honda e community diagnostic mapping](https://www.honda-e-forum.de/forum/thread/161-can-bus-protokoll-bit-header-und-baudrate/?postID=4387)
+and [Honda's e:Ny1 BMS documentation](https://www.techinfo.honda-eu.com/sites/default/files/2025-04/eNy1_BMS_TR_001.pdf);
+only the two fields confirmed on the e:NP2 are exposed here.
 
 ## Entities (Kia EV6 / E-GMP profile)
 

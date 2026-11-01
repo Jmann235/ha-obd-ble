@@ -9,6 +9,7 @@ from elm.obd import (
     assemble_isotp_messages,
     extract_payload,
     parse_frame_line,
+    response_id,
 )
 
 
@@ -25,6 +26,13 @@ def isotp_frames(can_id: int, payload: bytes) -> list[tuple[int, bytes]]:
 
 
 class TestParseFrameLine:
+    @pytest.mark.parametrize("line", ["18DAF1600462702201", "18 DA F1 60 04 62 70 22 01"])
+    def test_29_bit_frame(self, line):
+        assert parse_frame_line(line) == (0x18DAF160, bytes.fromhex("0462702201"))
+
+    @pytest.mark.parametrize("line", ["FFFFFFFF0462702201", "FFF0462702201", "18DAF160"])
+    def test_invalid_can_ids_rejected(self, line):
+        assert parse_frame_line(line) is None
     def test_single_frame_line(self):
         assert parse_frame_line("7EC04628334D5") == (0x7EC, bytes.fromhex("04628334D5"))
 
@@ -40,6 +48,8 @@ class TestParseFrameLine:
 
 
 class TestAssembleIsotp:
+    def test_truncated_first_frame(self):
+        assert assemble_isotp_messages([(0x18DAF101, b"\x10")], 0x18DAF101) == []
     def test_single_frame(self):
         frames = [(0x7EC, bytes.fromhex("04628334D5"))]
         assert assemble_isotp_messages(frames, rx_id=0x7EC) == [bytes.fromhex("628334D5")]
@@ -93,3 +103,16 @@ class TestExtractPayload:
     def test_wrong_pid_echo_rejected(self):
         with pytest.raises(ObdDecodeError):
             extract_payload([bytes.fromhex("629999D5")], 0x22, 0x8334, 2)
+
+
+@pytest.mark.parametrize(
+    ("tx", "rx"), [(0x7E4, 0x7EC), (0x18DA01F1, 0x18DAF101), (0x18DA60F1, 0x18DAF160)]
+)
+def test_response_id(tx, rx):
+    assert response_id(tx) == rx
+
+
+@pytest.mark.parametrize("tx", [0x7DF00000, 0x18DB33F1, 0x20000000])
+def test_response_id_rejects_unsupported_addressing(tx):
+    with pytest.raises(ValueError):
+        response_id(tx)
