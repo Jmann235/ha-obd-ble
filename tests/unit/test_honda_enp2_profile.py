@@ -36,7 +36,7 @@ def test_registered_profile():
     assert profile.vin_tx_header == 0x18DA07F1
     assert profile.vin_did == 0xF190
     assert profile.headers == (0x18DA01F1, 0x18DA60F1)
-    assert {p.key for p in profile.pids if p.enabled_default} == {"soc", "odometer"}
+    assert {p.key for p in profile.pids if p.enabled_default} == {"soc", "odometer", "range"}
     candidates = [p for p in profile.pids if not p.verified]
     assert len(candidates) == 7
     assert all(not p.enabled_default and "experimental" in p.name for p in candidates)
@@ -69,7 +69,7 @@ def test_odometer_uses_full_32_bit_counter():
     assert pid.state_class == "total_increasing"
 
 
-@pytest.mark.parametrize("key,length", [("soc", 50), ("odometer", 8)])
+@pytest.mark.parametrize("key,length", [("soc", 50), ("odometer", 8), ("range", 15)])
 def test_short_payloads_are_rejected(key, length):
     pid = next(p for p in get_profile("honda_enp2").pids if p.key == key)
     with pytest.raises((ValueError, IndexError)):
@@ -132,3 +132,24 @@ def test_experimental_power_requires_both_inputs():
     assert power.compute({"hv_voltage": 383.6, "hv_current": 1.4}) == pytest.approx(0.53704)
     # Signed current is preserved without asserting which sign means charging.
     assert power.compute({"hv_voltage": 383.6, "hv_current": -1.4}) == pytest.approx(-0.53704)
+
+
+@pytest.mark.parametrize("fixture_key,expected", [("range_167", 167), ("range_166", 166)])
+@pytest.mark.parametrize("compact", [False, True])
+def test_range_live_captures(capture, fixture_key, expected, compact):
+    text = capture[fixture_key]["response"]
+    if compact:
+        text = text.replace(" ", "")
+    payload, value = decode_capture(get_profile("honda_enp2"), "range", text)
+    assert len(payload) == 54
+    assert value == expected
+    pid = next(p for p in get_profile("honda_enp2").pids if p.key == "range")
+    assert pid.enabled_default
+    assert pid.device_class == "distance"
+    assert pid.state_class == "measurement"  # Range may rise or fall; not an odometer.
+
+
+def test_range_filters_other_ecu(capture):
+    text = capture["range_166"]["response"].replace("18 DA F1 60", "18 DA F1 01")
+    with pytest.raises(ObdDecodeError, match="no positive response"):
+        decode_capture(get_profile("honda_enp2"), "range", text)

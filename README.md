@@ -120,6 +120,7 @@ and Kia profiles retain their 11-bit protocol defaults.
 | --- | --- | --- | --- |
 | Battery (%) | `18DA01F1` | `22202A` | data byte 50 |
 | Odometer (km) | `18DA60F1` | `227022` | data bytes 5-8, unsigned big-endian |
+| Range (km) | `18DA60F1` | `22702A` | data bytes 14-15, unsigned big-endian |
 | 12V battery voltage | adapter | `ATRV` | adapter-measured supply voltage |
 | VIN (diagnostic text sensor) | `18DA07F1` | `22F190` | cached VIN read by coordinator |
 
@@ -128,6 +129,11 @@ e:NP2 dashboard on 2026-11-01 using an iCar Pro 2S through an ESPHome proxy.
 The captured responses are regression fixtures: `202A` contains 243 data
 bytes and `7022` contains 54. Offsets count from zero after complete ISO-TP
 reassembly and removal of the `62` and DID echo; padding is excluded.
+Range is enabled by default. On 2026-11-02, `702A` returned 167 km, then
+166 km in three repeated reads matching the dashboard. The high byte for
+values above 255 km has not yet been independently verified. This is a
+measurement, not a cumulative distance counter.
+
 VIN is read separately with `22F190` at `18DA07F1`.
 The VIN sensor is available for every vehicle profile, uses the coordinator's
 persisted VIN and adds no polling. It stays unknown until a VIN is read.
@@ -163,7 +169,7 @@ modules are asleep: this profile polls the verified manufacturer DIDs.
 The initial DID/offset research came from
 [Honda e community diagnostic mapping](https://www.honda-e-forum.de/forum/thread/161-can-bus-protokoll-bit-header-und-baudrate/?postID=4387)
 and [Honda's e:Ny1 BMS documentation](https://www.techinfo.honda-eu.com/sites/default/files/2025-04/eNy1_BMS_TR_001.pdf);
-the two dashboard-confirmed fields remain enabled by default. Candidate
+the dashboard-confirmed SOC, odometer and range remain enabled by default. Candidate
 current and cell-SOC maps also use the
 [Honda e parameter catalog](https://pelican.clutch.engineering/cars/honda/e/parameters),
 which contains unverified entries for other platforms and is not evidence

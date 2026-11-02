@@ -1,9 +1,13 @@
-"""Honda e:NP2: dashboard-verified SOC and odometer over 29-bit CAN.
+"""Honda e:NP2: dashboard-verified SOC, odometer and range over 29-bit CAN.
 
 Verified on an e:NP2 on 2026-11-01 using an iCar Pro 2S through an ESPHome
 proxy. DID 202A returned 243 data bytes; B50 matched the dashboard's 81%.
 DID 7022 returned 54 data bytes; B5..B8 were 00 00 23 67 = 9063 km,
 independently confirmed on the dashboard. Offsets exclude the 62/DID echo.
+
+Range DID 702A matched 166 km in three captures on 2026-11-02; B14..B15
+were 00 A6 (previous capture 00 A7 = 167 km). The high byte above 255 km
+has not been independently validated.
 
 Additional candidate fields are explicitly experimental and disabled by default.
 Their regression values validate byte extraction, not physical sensor accuracy.
@@ -105,6 +109,17 @@ HONDA_ENP2 = VehicleProfile(
             unit="km",
             device_class="distance",
             state_class="total_increasing",
+            precision=0,
+        ),
+        PidDefinition(
+            key="range",
+            name="Range",
+            mode=0x22,
+            pid=0x702A,
+            tx_header=0x18DA60F1,
+            decode=lambda p: float(u16(p, 14)),
+            unit="km",
+            device_class="distance",
             precision=0,
         ),
         *_CANDIDATES,
