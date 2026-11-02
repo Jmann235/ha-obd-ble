@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .base import VehicleProfile
 from .chevy_bolt import CHEVY_BOLT_2017_2018, CHEVY_BOLT_2019_PLUS
+from .honda_enp2 import HONDA_ENP2
 from .kia_ev6 import KIA_EV6
 
 PROFILES: dict[str, VehicleProfile] = {
@@ -12,6 +13,7 @@ PROFILES: dict[str, VehicleProfile] = {
         CHEVY_BOLT_2017_2018,
         CHEVY_BOLT_2019_PLUS,
         KIA_EV6,
+        HONDA_ENP2,
     )
 }
 

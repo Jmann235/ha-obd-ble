@@ -8,6 +8,7 @@ from datetime import datetime
 from homeassistant.components.sensor import (
     RestoreSensor,
     SensorDeviceClass,
+    SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
 )
@@ -88,7 +89,34 @@ async def async_setup_entry(
         )
     )
 
+    entities.append(
+        ObdVinSensor(
+            coordinator,
+            SensorEntityDescription(
+                key="vin",
+                name="VIN",
+                icon="mdi:car-info",
+                entity_category=EntityCategory.DIAGNOSTIC,
+            ),
+        )
+    )
+
     async_add_entities(entities)
+
+
+class ObdVinSensor(ObdBleEntity, SensorEntity):
+    """VIN already read and persisted by the coordinator; no extra polling."""
+
+    def __init__(
+        self, coordinator: ObdBleCoordinator, description: SensorEntityDescription
+    ) -> None:
+        super().__init__(coordinator, description.key)
+        self.entity_description = description
+
+    @property
+    def native_value(self) -> str | None:
+        data = self.coordinator.data
+        return data.vin if data is not None else None
 
 
 class ObdValueSensor(ObdBleEntity, RestoreSensor):

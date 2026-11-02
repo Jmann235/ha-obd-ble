@@ -73,14 +73,14 @@ async def cmd_sweep(args: argparse.Namespace) -> int:
     print(f"Connecting to {args.address} ...")
     await transport.connect()
     try:
-        banner = await elm.initialize()
+        banner = await elm.initialize(protocol=profile.elm_protocol)
         print(f"Adapter: {banner or '(no banner)'}")
 
         voltage = await elm.voltage()
         print(f"ATRV 12V rail: {voltage} V")
         results.append({"kind": "atrv", "value": voltage})
 
-        vin = await session.read_vin()
+        vin = await session.read_vin(tx_header=profile.vin_tx_header, did=profile.vin_did)
         print(f"VIN: {vin or '(no response — car asleep?)'}")
         results.append({"kind": "vin", "value": vin})
 
